@@ -13,7 +13,7 @@ def lambda_handler(event, context):
 
     message = {
         "jobId": job_id,
-        "source": "FACEBOOK_PAGE",
+        "source": "TMD Website",
         "requestedAt": datetime.utcnow().isoformat()
     }
 
