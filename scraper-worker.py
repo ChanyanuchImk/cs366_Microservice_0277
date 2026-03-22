@@ -163,42 +163,58 @@ def lambda_handler(event, context):
 
     print("Fetching warning page")
 
-    #Step1:ดึงหน้า list
     res = requests.get(URL, timeout=10)
     soup = BeautifulSoup(res.text, "html.parser")
 
-    links = soup.find_all("a", href=True)
+    all_links = soup.find_all("a", href=True)
 
-    warning_link = None
-    for a in links:
-        if "/warning-and-events/warning-storm/" in a["href"]:
-            warning_link = "https://www.tmd.go.th" + a["href"]
-            break
+    warning_links = []
 
-    if not warning_link:
-        print("Warning link not found")
+    for a in all_links:
+        href = a["href"]
+
+        if href.startswith("/warning-and-events/warning-storm/") and len(href) > 50:
+            link = "https://www.tmd.go.th" + href
+
+            if link not in warning_links:
+                warning_links.append(link)
+
+    if not warning_links:
+        print("No warning links found")
         return {"statusCode": 500}
 
-    print("Latest warning:", warning_link)
+    # เอา 3 อันแรก (ล่าสุด)
+    latest_links = warning_links[:3]
 
-    #Step2:เข้า detail page
-    res2 = requests.get(warning_link, timeout=10)
-    soup2 = BeautifulSoup(res2.text, "html.parser")
+    print("Latest links:", latest_links)
 
-    content = soup2.find("main")
-    if not content:
-        print("Warning content not found")
-        return {"statusCode": 500}
+    results = []
 
-    text = content.get_text(separator="\n", strip=True)
+    for link in latest_links:
+        try:
+            res2 = requests.get(link, timeout=10)
+            soup2 = BeautifulSoup(res2.text, "html.parser")
 
-    #Step3:Process pipeline
-    result = process_post(text, warning_link)
+            content = soup2.find("main")
+            if not content:
+                continue
+
+            text = content.get_text(separator="\n", strip=True)
+
+            result = process_post(text, link)
+
+            results.append({
+                "link": link,
+                "result": result
+            })
+
+        except Exception as e:
+            print("Error processing:", link, e)
 
     return {
         "statusCode": 200,
         "body": json.dumps({
             "message": "Scraping completed",
-            "result": result
+            "results": results
         })
     }
