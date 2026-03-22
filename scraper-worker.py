@@ -19,7 +19,7 @@ URL = "https://www.tmd.go.th/warning-and-events/warning-storm/"
 def normalize_post(text):
     event_type = "UNKNOWN"
     severity = "LOW"
-    area = "UNKNOWN"
+    areas = []
 
     if "ฝนตกหนัก" in text:
         event_type = "ฝนตกหนัก"
@@ -41,24 +41,27 @@ def normalize_post(text):
         severity = "สูง"
 
     if "ภาคเหนือ" in text:
-        area = "ภาคเหนือ"
-    elif "กรุงเทพ" in text:
-        area = "กรุงเทพ"
-    elif "ภาคตะวันออก" in text:
-        area = "ภาคตะวันออก"
-    elif "ภาคตะวันตก" in text:
-        area = "ภาคตะวันตก"
-    elif "ภาคใต้" in text:
-        area = "ภาคใต้"
-    elif "ภาคกลาง" in text:
-        area = "ภาคกลาง"
-    elif "ภาคตะวันออกเฉียงใต้" in text:
-        area = "ภาคตะวันออกเฉียงใต้"
+        areas.append("ภาคเหนือ")
+    if "กรุงเทพ" in text:
+        areas.append("กรุงเทพ")
+    if "ภาคตะวันออก" in text:
+        areas.append("ภาคตะวันออก")
+    if "ภาคตะวันตก" in text:
+        areas.append("ภาคตะวันตก")
+    if "ภาคใต้" in text:
+        areas.append("ภาคใต้")
+    if "ภาคกลาง" in text:
+        areas.append("ภาคกลาง")
+    if "ภาคตะวันออกเฉียงเหนือ" in text:
+        areas.append("ภาคตะวันออกเฉียงเหนือ")
+
+    if not areas:
+        areas.append("UNKNOWN")
 
     return {
         "eventType": event_type,
         "severity": severity,
-        "affectedArea": area
+        "affectedArea": areas
     }
 
 #Function 2: Generate Hash
