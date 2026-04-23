@@ -5,219 +5,163 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import uuid
 import hashlib
+import os
+import time
 
-dynamodb = boto3.resource('dynamodb')
-sns = boto3.client('sns')
+# AWS Clients
+dynamodb = boto3.resource("dynamodb")
+sqs = boto3.client("sqs")
 
-post_table = dynamodb.Table('ScrapedPost')
-dedup_table = dynamodb.Table('DeduplicationState')
+# Environment Variables
+POST_TABLE = os.environ["POST_TABLE"]
+DEDUP_TABLE = os.environ["DEDUP_TABLE"]
+JOB_TABLE = os.environ["JOB_TABLE"]
+PUBLISH_QUEUE_URL = os.environ["PUBLISH_QUEUE_URL"]
+COUNTER_TABLE = os.environ["COUNTER_TABLE"]
 
-TOPIC_ARN = "arn:aws:sns:us-east-1:415848059244:disaster-post-scraped-topic"
+# DynamoDB Tables
+post_table = dynamodb.Table(POST_TABLE)
+dedup_table = dynamodb.Table(DEDUP_TABLE)
+job_table = dynamodb.Table(JOB_TABLE)
+counter_table = dynamodb.Table(COUNTER_TABLE)
+
 URL = "https://www.tmd.go.th/warning-and-events/warning-storm/"
 
-#Function 1: Normalize Data
+def generate_post_id():
+    res = counter_table.update_item(
+        Key={"counterName": "POST"},
+        UpdateExpression="SET #v = if_not_exists(#v, :zero) + :inc",
+        ExpressionAttributeNames={"#v": "value"},
+        ExpressionAttributeValues={":inc": 1, ":zero": 0},
+        ReturnValues="UPDATED_NEW"
+    )
+    return f"INC_{int(res['Attributes']['value']):04d}"
+
+
 def normalize_post(text):
     event_type = "UNKNOWN"
     severity = "LOW"
     areas = []
 
     if "ฝนตกหนัก" in text:
-        event_type = "ฝนตกหนัก"
-        severity = "กลาง"
+        event_type, severity = "ฝนตกหนัก", "กลาง"
     elif "พายุ" in text:
-        event_type = "พายุ"
-        severity = "สูง"
+        event_type, severity = "พายุ", "สูง"
     elif "น้ำท่วม" in text:
-        event_type = "น้ำท่วม"
-        severity = "สูง"
+        event_type, severity = "น้ำท่วม", "สูง"
     elif "น้ำป่า" in text:
-        event_type = "น้ำป่า"
-        severity = "สูง"
+        event_type, severity = "น้ำป่า", "สูง"
     elif "แผ่นดินไหว" in text:
-        event_type = "แผ่นดินไหว"
-        severity = "สูง"
-    elif "ไฟไหม้" in text:
-        event_type = "ไฟไหม้"
-        severity = "สูง"
+        event_type, severity = "แผ่นดินไหว", "สูง"
 
-    if "ภาคเหนือ" in text:
-        areas.append("ภาคเหนือ")
-    if "กรุงเทพ" in text:
-        areas.append("กรุงเทพ")
-    if "ภาคตะวันออก" in text:
-        areas.append("ภาคตะวันออก")
-    if "ภาคตะวันตก" in text:
-        areas.append("ภาคตะวันตก")
-    if "ภาคใต้" in text:
-        areas.append("ภาคใต้")
-    if "ภาคกลาง" in text:
-        areas.append("ภาคกลาง")
-    if "ภาคตะวันออกเฉียงเหนือ" in text:
-        areas.append("ภาคตะวันออกเฉียงเหนือ")
+    if "ภาคเหนือ" in text: areas.append("ภาคเหนือ")
+    if "กรุงเทพ" in text: areas.append("กรุงเทพ")
+    if "ภาคตะวันออก" in text: areas.append("ภาคตะวันออก")
+    if "ภาคกลาง" in text: areas.append("ภาคกลาง")
+    if "ภาคตะวันออกเฉียงเหนือ" in text: areas.append("ภาคตะวันออกเฉียงเหนือ")
 
     if not areas:
         areas.append("UNKNOWN")
 
-    return {
-        "eventType": event_type,
-        "severity": severity,
-        "affectedArea": areas
-    }
+    return {"eventType": event_type, "severity": severity, "affectedArea": areas}
 
-#Function 2: Generate Hash
+
 def generate_hash(text):
-    return hashlib.md5(text.encode()).hexdigest()
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
 
-#Function 3: Check Duplicate
-def is_duplicate(content_hash):
-    res = dedup_table.get_item(Key={"contentHash": content_hash})
-    return "Item" in res
 
-#Function 4: Save Dedup State
-def save_dedup(content_hash, post_id):
+def is_duplicate(h):
+    return "Item" in dedup_table.get_item(Key={"contentHash": h})
+
+
+def save_dedup(h, pid):
     dedup_table.put_item(Item={
-        "contentHash": content_hash,
-        "postId": post_id,
-        "publishedToQueue": True,
+        "contentHash": h,
+        "postId": pid,
         "createdAt": datetime.utcnow().isoformat()
     })
 
-#Function 5: Publish Event
-def publish_event(event_message):
-    sns.publish(
-        TopicArn=TOPIC_ARN,
-        Message=json.dumps(event_message, ensure_ascii=False)
-    )
 
-#Function 6: Save Post
-def save_post(item):
-    post_table.put_item(Item=item)
-
-#Function 7: Main Pipeline
-def process_post(text, warning_link):
-
-    #1.Normalize
-    normalized = normalize_post(text)
-
-    #2.Generate hash
-    content_hash = generate_hash(text)
-
-    #3.Dedup check
-    if is_duplicate(content_hash):
-        print("Duplicate post, skip publish")
-        return "duplicate"
-
-    #4.Create post
-    post_id = str(uuid.uuid4())
-
-    item = {
-        "postId": post_id,
-        "messageText": text[:2000],
-        "publishedAt": datetime.utcnow().isoformat(),
-        "scrapedAt": datetime.utcnow().isoformat(),
-        "sourceUrl": warning_link,
-        "contentHash": content_hash,
-
-        #structured data
-        "eventType": normalized["eventType"],
-        "severity": normalized["severity"],
-        "affectedArea": normalized["affectedArea"]
-    }
-
-    #5.Save DB
-    save_post(item)
-
-    #6.Save dedup
-    save_dedup(content_hash, post_id)
-
-    print("Saved to DynamoDB")
-
-    #7.Create Event
-    event_message = {
-        "header": {
-            "messageId": str(uuid.uuid4()),
-            "timestamp": datetime.utcnow().isoformat(),
-            "version": "v1",
-            "source": "scraping-service"
-        },
-        "body": {
-            "postId": post_id,
-            "messageText": text[:200],
-            "publishedAt": datetime.utcnow().isoformat(),
-            "sourceUrl": warning_link,
-            "contentHash": content_hash,
-
-            #structured data
-            "eventType": normalized["eventType"],
-            "severity": normalized["severity"],
-            "affectedArea": normalized["affectedArea"]
-        }
-    }
-
-    #8.Publish Event
-    publish_event(event_message)
-
-    print("Event published")
-
-    return "processed"
-
-#Lambda Handler
-def lambda_handler(event, context):
-
-    print("Fetching warning page")
-
-    res = requests.get(URL, timeout=10)
-    soup = BeautifulSoup(res.text, "html.parser")
-
-    all_links = soup.find_all("a", href=True)
-
-    warning_links = []
-
-    for a in all_links:
-        href = a["href"]
-
-        if href.startswith("/warning-and-events/warning-storm/") and len(href) > 50:
-            link = "https://www.tmd.go.th" + href
-
-            if link not in warning_links:
-                warning_links.append(link)
-
-    if not warning_links:
-        print("No warning links found")
-        return {"statusCode": 500}
-
-    # เอา 3 อันแรก (ล่าสุด)
-    latest_links = warning_links[:3]
-
-    print("Latest links:", latest_links)
-
-    results = []
-
-    for link in latest_links:
+def get_with_retry(url):
+    for i in range(3):
         try:
-            res2 = requests.get(link, timeout=10)
-            soup2 = BeautifulSoup(res2.text, "html.parser")
+            r = requests.get(url, timeout=5)
+            if r.status_code != 200:
+                raise Exception(r.status_code)
+            return r
+        except Exception:
+            time.sleep(2 ** i)
+    raise Exception("HTTP fail")
 
-            content = soup2.find("main")
+def lambda_handler(event, context):
+    trace_id = context.aws_request_id
+
+    for record in event["Records"]:
+        body = json.loads(record["body"])
+        job_id = body["jobId"]
+
+        response = get_with_retry(URL)
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        links = []
+        for a in soup.find_all("a", href=True):
+            if "/warning-storm/" in a["href"]:
+                links.append("https://www.tmd.go.th" + a["href"])
+
+        for link in links[:3]:
+            detail = get_with_retry(link)
+            content = BeautifulSoup(detail.text, "html.parser").find("main")
             if not content:
                 continue
 
-            text = content.get_text(separator="\n", strip=True)
+            text = content.get_text("\n", strip=True)
+            norm = normalize_post(text)
+            h = generate_hash(text)
 
-            result = process_post(text, link)
+            if is_duplicate(h):
+                continue
 
-            results.append({
-                "link": link,
-                "result": result
-            })
+            post_id = generate_post_id()
+            now = datetime.utcnow().isoformat()
 
-        except Exception as e:
-            print("Error processing:", link, e)
+            post_item = {
+                "incident_id": post_id,
+                "incident_type": norm["eventType"],
+                "severity": norm["severity"],
+                "location_id": norm["affectedArea"],
+                "status": "reported",
+                "incident_start": None,
+                "occured_time": None,
+                "ended_time": None,
+                "description": text[:2000],
+                "reporter_id": "TMD",
+                "created_at": now,
+                "update_id": None
+            }
 
-    return {
-        "statusCode": 200,
-        "body": json.dumps({
-            "message": "Scraping completed",
-            "results": results
-        })
-    }
+            post_table.put_item(Item=post_item)
+            save_dedup(h, post_id)
+
+            sqs.send_message(
+                QueueUrl=PUBLISH_QUEUE_URL,
+                MessageBody=json.dumps({
+                    "header": {
+                        "messageId": str(uuid.uuid4()),
+                        "timestamp": now,
+                        "schemaVersion": "v1",
+                        "source": "scraping-service",
+                        "traceId": trace_id,
+                        "jobId": job_id
+                    },
+                    "body": post_item
+                }, ensure_ascii=False)
+            )
+
+        job_table.update_item(
+            Key={"jobId": job_id},
+            UpdateExpression="SET #s = :s",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": "COMPLETED"}
+        )
+
+    return {"statusCode": 200}
